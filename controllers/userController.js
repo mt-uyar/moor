@@ -1,19 +1,25 @@
-const sql = require('mssql');
-const config = require('../dbConfig');
-const userModel = require('../models/userModel');
+const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-// JWT secret key'i env'den al
+const pool = new Pool({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT || 5432,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
+
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// Token oluşturma fonksiyonu
 const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' });
 };
 
-// Auth middleware
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
@@ -46,11 +52,10 @@ const authenticateToken = async (req, res, next) => {
 
 async function listUsers(req, res) {
   try {
-    let pool = await sql.connect(config);
-    let result = await pool.request().query('SELECT * FROM dbo.[Users]');
+    const result = await pool.query('SELECT * FROM users');
     res.json({
       success: true,
-      users: result.recordset
+      users: result.rows
     });
   } catch (error) {
     console.error('Kullanıcılar listelenirken hata:', error);
@@ -65,7 +70,6 @@ async function createUser(req, res) {
   try {
     const { userName, fullName, email, password } = req.body;
 
-    // Gerekli alanları kontrol et
     if (!userName || !fullName || !email || !password) {
       return res.status(400).json({
         success: false,
@@ -73,26 +77,25 @@ async function createUser(req, res) {
       });
     }
 
-    let pool = await sql.connect(config);
     const errors = {};
 
     // Email kontrolü
-    const existingUserEmail = await pool
-      .request()
-      .input('email', sql.NVarChar, email)
-      .query('SELECT * FROM dbo.Users WHERE Email = @email');
+    const existingUserEmail = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
 
-    if (existingUserEmail.recordset.length > 0) {
+    if (existingUserEmail.rows.length > 0) {
       errors.emailError = 'Bu email adresi zaten kullanımda.';
     }
 
     // Kullanıcı adı kontrolü
-    const existingUserName = await pool
-      .request()
-      .input('username', sql.NVarChar, userName)
-      .query('SELECT * FROM dbo.Users WHERE UserName = @userName');
+    const existingUserName = await pool.query(
+      'SELECT * FROM users WHERE username = $1',
+      [userName]
+    );
 
-    if (existingUserName.recordset.length > 0) {
+    if (existingUserName.rows.length > 0) {
       errors.userNameError = 'Bu kullanıcı adı zaten kullanımda.';
     }
 
@@ -103,28 +106,16 @@ async function createUser(req, res) {
       });
     }
 
-    // Şifreyi hashle
     const hashedPassword = await bcrypt.hash(password, 10);
-    console.log('Hashed password:', hashedPassword); // Debug için
 
-    // Insert sorgusunu çalıştır
-    let result = await pool
-      .request()
-      .input('userName', sql.NVarChar, userName)
-      .input('fullName', sql.NVarChar, fullName)
-      .input('email', sql.NVarChar, email)
-      .input('password', sql.NVarChar, hashedPassword) // hashedPassword kullan
-      .input('active', sql.Bit, 1)
-      .input('createdAt', sql.DateTime, new Date())
-      .input('updatedAt', sql.DateTime, new Date())
-      .query(`
-        INSERT INTO dbo.Users (UserName, FullName, Email, Password, Active, CreatedAt, UpdatedAt)
-        VALUES (@userName, @fullName, @email, @password, @active, @createdAt, @updatedAt);
-        
-        SELECT SCOPE_IDENTITY() AS UserId;
-      `);
+    const result = await pool.query(
+      `INSERT INTO users (username, fullname, email, password, active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING user_id`,
+      [userName, fullName, email, hashedPassword, true, new Date(), new Date()]
+    );
 
-    const userId = result.recordset[0].UserId;
+    const userId = result.rows[0].user_id;
     const token = generateToken(userId);
 
     res.status(201).json({
@@ -151,20 +142,19 @@ async function updatePassword(req, res) {
   try {
     const { userId, currentPassword, newPassword } = req.body;
 
-    let pool = await sql.connect(config);
-    let userResult = await pool
-      .request()
-      .input('userId', sql.Int, userId)
-      .query('SELECT Password FROM dbo.Users WHERE UserId = @userId');
+    const userResult = await pool.query(
+      'SELECT password FROM users WHERE user_id = $1',
+      [userId]
+    );
 
-    if (userResult.recordset.length === 0) {
+    if (userResult.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Kullanıcı bulunamadı'
       });
     }
 
-    const hashedPassword = userResult.recordset[0].Password;
+    const hashedPassword = userResult.rows[0].password;
     const isMatch = await bcrypt.compare(currentPassword, hashedPassword);
     
     if (!isMatch) {
@@ -175,18 +165,11 @@ async function updatePassword(req, res) {
     }
 
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-    const updatedAt = new Date();
     
-    await pool
-      .request()
-      .input('userId', sql.Int, userId)
-      .input('newPassword', sql.NVarChar, hashedNewPassword)
-      .input('updatedAt', sql.DateTime, updatedAt)
-      .query(`
-        UPDATE dbo.Users 
-        SET Password = @newPassword, UpdatedAt = @updatedAt 
-        WHERE UserId = @userId
-      `);
+    await pool.query(
+      'UPDATE users SET password = $1, updated_at = $2 WHERE user_id = $3',
+      [hashedNewPassword, new Date(), userId]
+    );
 
     res.status(200).json({
       success: true,
@@ -205,7 +188,6 @@ async function login(req, res) {
   try {
     const { email, password } = req.body;
 
-    // Email ve password kontrolü
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -213,15 +195,13 @@ async function login(req, res) {
       });
     }
 
-    let pool = await sql.connect(config);
-    let result = await pool
-      .request()
-      .input('email', sql.NVarChar, email)
-      .query('SELECT UserId, Email, Password, FullName, Active FROM dbo.Users WHERE Email = @email');
+    const result = await pool.query(
+      'SELECT user_id, email, password, fullname, active FROM users WHERE email = $1',
+      [email]
+    );
     
-    const user = result.recordset[0];
+    const user = result.rows[0];
 
-    // Kullanıcı kontrolü
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -229,27 +209,14 @@ async function login(req, res) {
       });
     }
 
-    // Kullanıcı aktif mi kontrolü
-    if (!user.Active) {
+    if (!user.active) {
       return res.status(401).json({
         success: false,
         message: 'Hesabınız aktif değil'
       });
     }
 
-    // Password kontrolü - null check eklenmiş hali
-    if (!user.Password) {
-      console.error('Veritabanında hash\'lenmiş şifre bulunamadı');
-      return res.status(500).json({
-        success: false,
-        message: 'Bir hata oluştu, lütfen daha sonra tekrar deneyin'
-      });
-    }
-
-    console.log('Password from request:', password); // Debug için
-    console.log('Hashed password from DB:', user.Password); // Debug için
-
-    const match = await bcrypt.compare(password, user.Password);
+    const match = await bcrypt.compare(password, user.password);
 
     if (!match) {
       return res.status(401).json({
@@ -258,29 +225,20 @@ async function login(req, res) {
       });
     }
 
-    // Token oluştur
-    const token = generateToken(user.UserId);
+    const token = generateToken(user.user_id);
 
-    // Token'ı veritabanına kaydet
-    await pool
-      .request()
-      .input('userId', sql.Int, user.UserId)
-      .input('token', sql.NVarChar, token)
-      .input('updatedAt', sql.DateTime, new Date())
-      .query(`
-        UPDATE dbo.Users 
-        SET Token = @token, UpdatedAt = @updatedAt 
-        WHERE UserId = @userId
-      `);
+    await pool.query(
+      'UPDATE users SET token = $1, updated_at = $2 WHERE user_id = $3',
+      [token, new Date(), user.user_id]
+    );
 
-    // Başarılı response
     res.status(200).json({
       success: true,
       message: 'Giriş başarılı',
       user: {
-        userId: user.UserId,
-        fullName: user.FullName,
-        email: user.Email,
+        userId: user.user_id,
+        fullName: user.fullname,
+        email: user.email,
         token
       }
     });
@@ -313,14 +271,12 @@ async function verifyToken(req, res) {
         });
       }
 
-      let pool = await sql.connect(config);
-      let result = await pool
-        .request()
-        .input('userId', sql.Int, decoded.userId)
-        .input('token', sql.NVarChar, token)
-        .query('SELECT UserId FROM dbo.Users WHERE UserId = @userId AND Token = @token');
+      const result = await pool.query(
+        'SELECT user_id FROM users WHERE user_id = $1 AND token = $2',
+        [decoded.userId, token]
+      );
 
-      if (result.recordset.length === 0) {
+      if (result.rows.length === 0) {
         return res.status(200).json({ 
           success: true,
           valid: false 
@@ -346,11 +302,10 @@ async function logout(req, res) {
   try {
     const { userId } = req.body;
 
-    let pool = await sql.connect(config);
-    await pool
-      .request()
-      .input('userId', sql.Int, userId)
-      .query('UPDATE dbo.Users SET Token = NULL WHERE UserId = @userId');
+    await pool.query(
+      'UPDATE users SET token = NULL WHERE user_id = $1',
+      [userId]
+    );
 
     res.status(200).json({
       success: true,
@@ -365,7 +320,6 @@ async function logout(req, res) {
   }
 }
 
-// Tek bir exports ile tüm fonksiyonları dışa aktar
 module.exports = {
   listUsers,
   createUser,

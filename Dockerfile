@@ -17,4 +17,4 @@ COPY . .
 EXPOSE 3000
 
 # Uygulamayı başlat
-CMD ["node", "server.js"]
+CMD ["node", "app.js"]

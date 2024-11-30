@@ -1,0 +1,26 @@
+{
+  "name": "moor-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cheerio": "^1.0.0-rc.12",
+    "dotenv": "^10.0.0",
+    "express": "^4.17.1",
+    "mssql": "^8.0.0",
+    "pg": "^8.13.1",
+    "request": "^2.88.2",
+    "request-promise": "^4.2.6"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}
